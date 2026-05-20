@@ -18,7 +18,7 @@ import type {
   SkillSummary,
 } from '../types';
 import { Icon } from './Icon';
-import { NewProjectPanel, type CreateInput } from './NewProjectPanel';
+import { NewProjectPanel, type CreateInput, type CreateTab } from './NewProjectPanel';
 
 interface Props {
   open: boolean;
@@ -26,6 +26,7 @@ interface Props {
   designSystems: DesignSystemSummary[];
   defaultDesignSystemId: string | null;
   templates: ProjectTemplate[];
+  onDeleteTemplate?: (id: string) => Promise<boolean>;
   promptTemplates: PromptTemplateSummary[];
   mediaProviders?: Record<string, MediaProviderCredentials>;
   connectors?: ConnectorDetail[];
@@ -36,6 +37,7 @@ interface Props {
   onImportFolder?: (baseDir: string) => Promise<void> | void;
   onOpenConnectorsTab?: () => void;
   onClose: () => void;
+  initialTab?: CreateTab;
 }
 
 export function NewProjectModal({
@@ -44,6 +46,7 @@ export function NewProjectModal({
   designSystems,
   defaultDesignSystemId,
   templates,
+  onDeleteTemplate,
   promptTemplates,
   mediaProviders,
   connectors,
@@ -54,6 +57,7 @@ export function NewProjectModal({
   onImportFolder,
   onOpenConnectorsTab,
   onClose,
+  initialTab,
 }: Props) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
@@ -113,6 +117,7 @@ export function NewProjectModal({
             designSystems={designSystems}
             defaultDesignSystemId={defaultDesignSystemId}
             templates={templates}
+            {...(onDeleteTemplate ? { onDeleteTemplate } : {})}
             promptTemplates={promptTemplates}
             {...(mediaProviders ? { mediaProviders } : {})}
             {...(connectors ? { connectors } : {})}
@@ -125,6 +130,7 @@ export function NewProjectModal({
             {...(onImportClaudeDesign ? { onImportClaudeDesign } : {})}
             {...(onImportFolder ? { onImportFolder } : {})}
             {...(onOpenConnectorsTab ? { onOpenConnectorsTab } : {})}
+            {...(initialTab ? { initialTab } : {})}
           />
         </div>
       </div>

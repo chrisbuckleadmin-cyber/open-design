@@ -166,7 +166,8 @@ describe('HomeHero plugin picker', () => {
     expect(screen.getByRole('tab', { name: /plugins/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /skills/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /mcp/i })).toBeTruthy();
-    expect(screen.getByText('Search plugins, skills, and MCP servers.')).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /connectors/i })).toBeTruthy();
+    expect(screen.getByText('Search plugins, skills, MCP servers, and connectors.')).toBeTruthy();
   });
 
   it('can pick skills and MCP servers from the home @ picker', () => {
@@ -327,11 +328,16 @@ describe('HomeHero plugin picker', () => {
       />,
     );
 
-    const slot = screen.getByTestId('home-hero-prompt-slot-source') as HTMLSelectElement;
-    expect(slot.value).toBe('marketplace');
+    // The inline pill is a read-only span so its width tracks the
+    // textarea text exactly — editing happens in the form below. (See
+    // HomeHero.tsx for why <input>/<select> at this position caused the
+    // overlay/textarea caret drift.)
+    const slot = screen.getByTestId('home-hero-prompt-slot-source');
+    expect(slot.tagName).toBe('SPAN');
+    expect(slot.textContent).toBe('marketplace');
     expect(slot.getAttribute('data-filled')).toBe('true');
-    expect(screen.getByDisplayValue('marketplace')).toBeTruthy();
-    expect(screen.queryByTestId('plugin-inputs-form')).toBeNull();
+    const form = screen.getByTestId('plugin-inputs-form');
+    expect(form.querySelector('[data-field-name="source"]')).toBeTruthy();
 
     rerender(
       <HomeHero

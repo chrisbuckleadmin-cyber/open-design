@@ -3,23 +3,30 @@ import type { CSSProperties, Dispatch, SetStateAction } from 'react';
 import { validateBaseUrl } from '@open-design/contracts/api/connectionTest';
 import {
   agentIdToTracking,
+  byokProtocolToTracking,
   executionModeToTracking,
   settingsSectionToTracking,
 } from '@open-design/contracts/analytics';
 import { useAnalytics } from '../analytics/provider';
 import {
+  trackSettingsAppearanceClick,
   trackSettingsByokTestResult,
   trackSettingsCliTestResult,
-  trackSettingsClickByokField,
-  trackSettingsClickByokProviderOption,
-  trackSettingsClickCliProviderCard,
-  trackSettingsClickExecutionModeTab,
+  trackSettingsByokFieldClick,
+  trackSettingsByokProviderOptionClick,
+  trackSettingsConnectorAuthResult,
+  trackSettingsLanguageClick,
+  trackSettingsLocalCliClick,
+  trackSettingsExecutionModeTabClick,
+  trackSettingsNotificationsClick,
+  trackSettingsPrivacyClick,
   trackSettingsView,
 } from '../analytics/events';
 import { LOCALE_LABEL, LOCALES, useI18n } from '../i18n';
 import type { Locale } from '../i18n';
 import type { Dict } from '../i18n/types';
 import { AgentIcon } from './AgentIcon';
+import { ExportDiagnosticsRow } from './ExportDiagnosticsButton';
 import { Icon } from './Icon';
 import {
   CUSTOM_MODEL_SENTINEL,
@@ -68,7 +75,8 @@ import type {
 import { testAgent, testApiProvider } from '../providers/connection-test';
 import { fetchProviderModels } from '../providers/provider-models';
 import { fetchConnectors, fetchDesignTemplates } from '../providers/registry';
-import { MEDIA_PROVIDERS } from '../media/models';
+import { IMAGE_MODELS, MEDIA_PROVIDERS } from '../media/models';
+import { XaiOAuthControl } from './XaiOAuthControl';
 import type { MediaProvider } from '../media/models';
 import { Toast } from './Toast';
 import { PetSettings } from './pet/PetSettings';
@@ -103,6 +111,7 @@ import {
 
 export type SettingsSection =
   | 'execution'
+  | 'instructions'
   | 'media'
   | 'composio'
   | 'orbit'
@@ -351,9 +360,18 @@ const AGENT_CLI_ENV_FIELDS = [
   },
   {
     agentId: 'codex',
+    envKey: 'CODEX_API_KEY',
+    labelKey: 'settings.cliEnvCodexApiKey',
+    labelSuffix: 'CODEX_API_KEY',
+    placeholder: 'Paste CODEX_API_KEY',
+    secret: true,
+  },
+  {
+    agentId: 'codex',
     envKey: 'OPENAI_API_KEY',
     labelKey: 'settings.cliEnvCodexApiKey',
-    placeholder: 'Paste proxy API key',
+    labelSuffix: 'OPENAI_API_KEY · proxy/legacy',
+    placeholder: 'Paste OPENAI_API_KEY',
     secret: true,
   },
 ] as const;
@@ -433,6 +451,7 @@ function currentApiProtocolConfig(config: AppConfig): ApiProtocolConfig {
     model: config.model,
     apiVersion: config.apiVersion ?? '',
     apiProviderBaseUrl: config.apiProviderBaseUrl ?? null,
+    byokImageModel: config.byokImageModel ?? '',
   };
 }
 
@@ -449,6 +468,11 @@ function applyApiProtocolConfig(
     model: apiConfig.model,
     apiProviderBaseUrl: apiConfig.apiProviderBaseUrl ?? null,
     apiVersion: protocol === 'azure' ? (apiConfig.apiVersion ?? '') : '',
+    // byokImageModel is SenseAudio-only — flipping to another BYOK tab
+    // shouldn't carry a SenseAudio image-model choice into, say, the
+    // OpenAI form. Mirrors the apiVersion guarding above.
+    byokImageModel:
+      protocol === 'senseaudio' ? (apiConfig.byokImageModel ?? '') : '',
   };
 }
 
@@ -763,19 +787,15 @@ export function SettingsDialog({
   useEffect(() => {
     if (lastViewSectionRef.current === activeSection) return;
     lastViewSectionRef.current = activeSection;
-    const hasCli = agents.some((a) => a.available);
-    const selected = agents.find((a) => a.id === cfg.agentId && a.available);
+    // v2 settings_view collapses to `{ page=settings, area }`; the
+    // execution_mode / has_available_cli / selected_cli_id signal that v1
+    // tagged onto every view now lives in the configure-state global
+    // properties (registered once and inherited by every event).
     trackSettingsView(analytics.track, {
       page: 'settings',
-      area: 'settings_panel',
-      element: 'page',
-      view_type: 'page',
-      active_section: settingsSectionToTracking(activeSection),
-      execution_mode: executionModeToTracking(cfg.mode),
-      has_available_cli: hasCli,
-      ...(selected ? { selected_cli_id: agentIdToTracking(selected.id) } : {}),
+      area: settingsSectionToTracking(activeSection),
     });
-  }, [activeSection, agents, cfg.mode, cfg.agentId, analytics.track]);
+  }, [activeSection, analytics.track]);
   useEffect(() => {
     const el = settingsContentRef.current;
     if (el) el.scrollTop = 0;
@@ -788,6 +808,16 @@ export function SettingsDialog({
   // stale result be ignored when it returns; the button stays disabled so a
   // new smoke test cannot overlap the old one.
   const agentChoiceForTest = cfg.agentModels?.[cfg.agentId ?? ''];
+  const selectedMemoryChatAgent =
+    cfg.mode === 'daemon' && cfg.agentId
+      ? agents.find((agent) => agent.id === cfg.agentId) ?? null
+      : null;
+  const selectedMemoryChatModel =
+    cfg.mode === 'daemon' && cfg.agentId
+      ? cfg.agentModels?.[cfg.agentId]?.model
+      ?? selectedMemoryChatAgent?.models?.[0]?.id
+      ?? null
+    : null;
   useEffect(() => {
     agentTestRevisionRef.current += 1;
     setAgentTestState((state) =>
@@ -851,9 +881,9 @@ export function SettingsDialog({
       const modeBefore = executionModeToTracking(c.mode);
       const modeAfter = executionModeToTracking(mode);
       if (modeBefore !== modeAfter) {
-        trackSettingsClickExecutionModeTab(analytics.track, {
+        trackSettingsExecutionModeTabClick(analytics.track, {
           page: 'settings',
-          area: 'execution_model',
+          area: 'configure_execution_mode',
           element: 'execution_mode_tab',
           action: 'switch_execution_mode',
           mode_before: modeBefore,
@@ -923,7 +953,7 @@ export function SettingsDialog({
       setAgentTestState({ status: 'done', result });
       trackSettingsCliTestResult(analytics.track, {
         page: 'settings',
-        area: 'execution_model',
+        area: 'configure_execution_mode',
         cli_provider_id: cliProviderId,
         result: result.ok ? 'success' : 'failed',
         ...(result.ok ? {} : { error_code: result.kind || 'UNKNOWN' }),
@@ -947,7 +977,7 @@ export function SettingsDialog({
       });
       trackSettingsCliTestResult(analytics.track, {
         page: 'settings',
-        area: 'execution_model',
+        area: 'configure_execution_mode',
         cli_provider_id: cliProviderId,
         result: 'failed',
         error_code: err instanceof Error ? err.name : 'UNKNOWN',
@@ -994,14 +1024,17 @@ export function SettingsDialog({
         return;
       }
       setProviderTestState({ status: 'done', result });
-      trackSettingsByokTestResult(analytics.track, {
-        page: 'settings',
-        area: 'execution_model',
-        provider_id: apiProtocol,
-        result: result.ok ? 'success' : 'failed',
-        ...(result.ok ? {} : { error_code: result.kind || 'UNKNOWN' }),
-        duration_ms: Math.round(performance.now() - startedAt),
-      });
+      const byokProviderId = byokProtocolToTracking(apiProtocol);
+      if (byokProviderId) {
+        trackSettingsByokTestResult(analytics.track, {
+          page: 'settings',
+          area: 'execution_model',
+          provider_id: byokProviderId,
+          result: result.ok ? 'success' : 'failed',
+          ...(result.ok ? {} : { error_code: result.kind || 'UNKNOWN' }),
+          duration_ms: Math.round(performance.now() - startedAt),
+        });
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       if (providerTestRevisionRef.current !== revision) {
@@ -1018,14 +1051,17 @@ export function SettingsDialog({
           detail: err instanceof Error ? err.message : 'Test request failed',
         },
       });
-      trackSettingsByokTestResult(analytics.track, {
-        page: 'settings',
-        area: 'execution_model',
-        provider_id: apiProtocol,
-        result: 'failed',
-        error_code: err instanceof Error ? err.name : 'UNKNOWN',
-        duration_ms: Math.round(performance.now() - startedAt),
-      });
+      const byokProviderId = byokProtocolToTracking(apiProtocol);
+      if (byokProviderId) {
+        trackSettingsByokTestResult(analytics.track, {
+          page: 'settings',
+          area: 'execution_model',
+          provider_id: byokProviderId,
+          result: 'failed',
+          error_code: err instanceof Error ? err.name : 'UNKNOWN',
+          duration_ms: Math.round(performance.now() - startedAt),
+        });
+      }
     } finally {
       if (providerTestAbortRef.current === controller) {
         providerTestAbortRef.current = null;
@@ -1461,12 +1497,16 @@ export function SettingsDialog({
   // not twice (heading + tab).
   const sectionHeader: Record<SettingsSection, { title: string; subtitle: string }> = {
     execution: { title: t('settings.title'), subtitle: t('settings.subtitle') },
+    instructions: {
+      title: 'Instructions / Rules',
+      subtitle: 'Fixed behavior the assistant should follow',
+    },
     media: { title: t('settings.mediaProviders'), subtitle: t('settings.mediaProvidersHint') },
     composio: { title: t('connectors.title'), subtitle: t('connectors.subtitle') },
     orbit: { title: t('settings.orbit.title'), subtitle: t('settings.orbit.lede') },
     routines: {
-      title: 'Routines',
-      subtitle: 'Scheduled, unattended agent sessions that run on their own.',
+      title: 'Automations',
+      subtitle: 'Scheduled automations that run unattended.',
     },
     integrations: { title: t('settings.mcpServerTitle'), subtitle: t('settings.mcpServerHint') },
     mcpClient: { title: t('settings.externalMcpTitle'), subtitle: t('settings.externalMcpHint') },
@@ -1582,6 +1622,17 @@ export function SettingsDialog({
             </button>
             <button
               type="button"
+              className={`settings-nav-item${activeSection === 'instructions' ? ' active' : ''}`}
+              onClick={() => setActiveSection('instructions')}
+            >
+              <Icon name="edit" size={18} />
+              <span>
+                <strong>Instructions / Rules</strong>
+                <small>Fixed assistant behavior</small>
+              </span>
+            </button>
+            <button
+              type="button"
               className={`settings-nav-item${activeSection === 'memory' ? ' active' : ''}`}
               onClick={() => setActiveSection('memory')}
             >
@@ -1633,28 +1684,6 @@ export function SettingsDialog({
               <span>
                 <strong>{t('connectors.title')}</strong>
                 <small>{t('settings.connectorsNavHint')}</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className={`settings-nav-item${activeSection === 'orbit' ? ' active' : ''}`}
-              onClick={() => setActiveSection('orbit')}
-            >
-              <Icon name="orbit" size={18} />
-              <span>
-                <strong>{t('settings.orbit.title')}</strong>
-                <small>{t('settings.orbit.navHint')}</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className={`settings-nav-item${activeSection === 'routines' ? ' active' : ''}`}
-              onClick={() => setActiveSection('routines')}
-            >
-              <Icon name="history" size={18} />
-              <span>
-                <strong>Routines</strong>
-                <small>Schedule unattended agent runs</small>
               </span>
             </button>
             <button
@@ -1817,14 +1846,17 @@ export function SettingsDialog({
                       aria-selected={apiProtocol === tab.id}
                       className={'protocol-chip' + (apiProtocol === tab.id ? ' active' : '')}
                       onClick={() => {
-                        trackSettingsClickByokProviderOption(analytics.track, {
-                          page: 'settings',
-                          area: 'execution_model',
-                          element: 'byok_provider_option',
-                          action: 'select_byok_provider',
-                          provider_id: tab.id,
-                          is_selected: apiProtocol === tab.id,
-                        });
+                        const byokProviderId = byokProtocolToTracking(tab.id);
+                        if (byokProviderId) {
+                          trackSettingsByokProviderOptionClick(analytics.track, {
+                            page: 'settings',
+                            area: 'configure_execution_mode_byok',
+                            element: 'byok_provider_option',
+                            action: 'select_byok_provider',
+                            provider_id: byokProviderId,
+                            is_selected: apiProtocol === tab.id,
+                          });
+                        }
                         setApiProtocol(tab.id);
                       }}
                     >
@@ -1926,14 +1958,12 @@ export function SettingsDialog({
                             'agent-card' + (active ? ' active' : '')
                           }
                           onClick={() => {
-                            trackSettingsClickCliProviderCard(analytics.track, {
+                            trackSettingsLocalCliClick(analytics.track, {
                               page: 'settings',
-                              area: 'execution_model',
-                              element: 'cli_provider_card',
-                              action: 'select_cli_provider',
+                              area: 'configure_execution_mode_local_cli',
+                              element: 'cli_provider',
                               cli_provider_id: agentIdToTracking(a.id),
                               install_status: a.available ? 'installed' : 'not_installed',
-                              is_selected: !active,
                             });
                             setCfg((c) => ({ ...c, agentId: a.id }));
                           }}
@@ -2174,6 +2204,15 @@ export function SettingsDialog({
                 const selectValue = customActive
                   ? CUSTOM_MODEL_SENTINEL
                   : modelValue;
+                const modelSource = selected.modelsSource ?? 'fallback';
+                const modelSourceLabel =
+                  modelSource === 'live'
+                    ? t('settings.modelSourceLive')
+                    : t('settings.modelSourceFallback');
+                const modelSourceHint =
+                  modelSource === 'live'
+                    ? t('settings.modelPickerLiveHint')
+                    : t('settings.modelPickerFallbackHint');
                 return (
                   <div className="agent-model-row">
                     <div className="agent-model-row-head">
@@ -2184,6 +2223,11 @@ export function SettingsDialog({
                         <label className="field">
                           <span className="field-label">
                             {t('settings.modelPicker')}
+                            <span
+                              className={`agent-model-source-badge ${modelSource}`}
+                            >
+                              {modelSourceLabel}
+                            </span>
                           </span>
                           <div className="agent-model-select-wrap">
                             <select
@@ -2220,7 +2264,7 @@ export function SettingsDialog({
                           </div>
                         </label>
                         <p className="hint agent-model-row-hint">
-                          {t('settings.modelPickerHint')}
+                          {modelSourceHint}
                         </p>
                       </>
                     ) : null}
@@ -2304,7 +2348,10 @@ export function SettingsDialog({
                 );
                 if (cliEnvFields.length === 0) return null;
                 return (
-                  <details className="agent-cli-env">
+                  <details
+                    className="agent-cli-env"
+                    data-testid="settings-cli-env"
+                  >
                     <summary className="agent-cli-env-summary">
                       <span className="agent-cli-env-summary-title">
                         {t('settings.cliEnvTitle')}
@@ -2320,6 +2367,9 @@ export function SettingsDialog({
                           >
                             <span className="field-label">
                               {t(field.labelKey)}
+                              {'labelSuffix' in field
+                                ? ` (${field.labelSuffix})`
+                                : ''}
                             </span>
                             <input
                               type={
@@ -2518,15 +2568,16 @@ export function SettingsDialog({
                     value={cfg.apiKey}
                     onChange={(e) => updateApiConfig({ apiKey: e.target.value })}
                     onFocus={() => {
-                      trackSettingsClickByokField(analytics.track, {
-                        page: 'settings',
-                        area: 'execution_model',
-                        element: 'byok_field',
-                        action: 'focus_byok_field',
-                        field_id: 'api_key',
-                        provider_id: apiProtocol,
-                        has_value: Boolean(cfg.apiKey?.trim()),
-                      });
+                      const byokProviderId = byokProtocolToTracking(apiProtocol);
+                      if (byokProviderId) {
+                        trackSettingsByokFieldClick(analytics.track, {
+                          page: 'settings',
+                          area: 'configure_execution_mode_byok',
+                          element: 'api_key',
+                          provider_id: byokProviderId,
+                          has_value: Boolean(cfg.apiKey?.trim()),
+                        });
+                      }
                     }}
                     autoFocus
                   />
@@ -2551,15 +2602,16 @@ export function SettingsDialog({
                 <select
                   value={apiModelSelectValue}
                   onFocus={() => {
-                    trackSettingsClickByokField(analytics.track, {
-                      page: 'settings',
-                      area: 'execution_model',
-                      element: 'byok_field',
-                      action: 'focus_byok_field',
-                      field_id: 'model',
-                      provider_id: apiProtocol,
-                      has_value: Boolean(cfg.model?.trim()),
-                    });
+                    const byokProviderId = byokProtocolToTracking(apiProtocol);
+                    if (byokProviderId) {
+                      trackSettingsByokFieldClick(analytics.track, {
+                        page: 'settings',
+                        area: 'configure_execution_mode_byok',
+                        element: 'model',
+                        provider_id: byokProviderId,
+                        has_value: Boolean(cfg.model?.trim()),
+                      });
+                    }
                   }}
                   onChange={(e) => {
                     if (e.target.value === CUSTOM_MODEL_SENTINEL) {
@@ -2616,15 +2668,16 @@ export function SettingsDialog({
                     baseUrlInvalid ? 'settings-base-url-error' : undefined
                   }
                   onFocus={() => {
-                    trackSettingsClickByokField(analytics.track, {
-                      page: 'settings',
-                      area: 'execution_model',
-                      element: 'byok_field',
-                      action: 'focus_byok_field',
-                      field_id: 'base_url',
-                      provider_id: apiProtocol,
-                      has_value: Boolean(cfg.baseUrl?.trim()),
-                    });
+                    const byokProviderId = byokProtocolToTracking(apiProtocol);
+                    if (byokProviderId) {
+                      trackSettingsByokFieldClick(analytics.track, {
+                        page: 'settings',
+                        area: 'configure_execution_mode_byok',
+                        element: 'base_url',
+                        provider_id: byokProviderId,
+                        has_value: Boolean(cfg.baseUrl?.trim()),
+                      });
+                    }
                   }}
                   onChange={(e) => updateApiConfig({ baseUrl: e.target.value, apiProviderBaseUrl: null })}
                 />
@@ -2647,6 +2700,34 @@ export function SettingsDialog({
                     placeholder="2024-10-21"
                     onChange={(e) => updateApiConfig({ apiVersion: e.target.value.trim() })}
                   />
+                </label>
+              ) : null}
+              {apiProtocol === 'senseaudio' ? (
+                <label className="field">
+                  <span className="field-label">{t('settings.byokImageModel')}</span>
+                  <select
+                    value={cfg.byokImageModel ?? ''}
+                    onChange={(e) =>
+                      updateApiConfig({ byokImageModel: e.target.value })
+                    }
+                  >
+                    {/* Default-empty option resolves to the registry default
+                        on the daemon side (senseaudio-image-2.0-260319 today).
+                        Listing it explicitly lets the picker show what the
+                        unconfigured state actually means. */}
+                    <option value="">
+                      {IMAGE_MODELS.find((m) => m.provider === 'senseaudio')?.label
+                        ?? 'senseaudio-image-2.0'}
+                      {' (default)'}
+                    </option>
+                    {IMAGE_MODELS.filter((m) => m.provider === 'senseaudio').map(
+                      (m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ),
+                    )}
+                  </select>
                 </label>
               ) : null}
               <p className="hint">{t('settings.apiHint')}</p>
@@ -2676,6 +2757,16 @@ export function SettingsDialog({
               setCfg={setCfg}
               composioConfigLoading={composioConfigLoading}
               onPersistComposioKey={onPersistComposioKey}
+              onConnectorAuthResult={({ connectorId, action, result, errorCode }) =>
+                trackSettingsConnectorAuthResult(analytics.track, {
+                  page: 'settings',
+                  area: 'connectors',
+                  connector_id: connectorId,
+                  action,
+                  result,
+                  ...(errorCode ? { error_code: errorCode } : {}),
+                })
+              }
             />
           ) : null}
 
@@ -2714,7 +2805,17 @@ export function SettingsDialog({
                     role="radio"
                     aria-checked={active}
                     className={`settings-language-tile${active ? ' active' : ''}`}
-                    onClick={() => setLocale(code as Locale)}
+                    onClick={() => {
+                      // P1 ui_click area=language — record the locale id
+                      // that was picked, regardless of whether it differs
+                      // from the current one (user clicked = signal).
+                      trackSettingsLanguageClick(analytics.track, {
+                        page: 'settings',
+                        area: 'language',
+                        element: code,
+                      });
+                      setLocale(code as Locale);
+                    }}
                   >
                     <span className="settings-language-tile-text">
                       <span className="settings-language-tile-title">
@@ -2756,26 +2857,45 @@ export function SettingsDialog({
             <DesignSystemsSection cfg={cfg} setCfg={setCfg} />
           ) : null}
 
-          {activeSection === 'memory' ? (
-            <>
-              <section className="settings-section settings-section-card">
-                <div className="section-head">
+          {activeSection === 'instructions' ? (
+            <section className="settings-section settings-section-card instructions-rules-section">
+              <div className="memory-field-block instructions-rules-card">
+                <div className="memory-block-head">
+                  <span className="memory-block-icon">
+                    <Icon name="sliders" size={15} />
+                  </span>
                   <div>
-                    <h3>{t('settings.customInstructionsTitle')}</h3>
-                    <p className="hint">{t('settings.customInstructionsHint')}</p>
+                    <h4>{t('settings.customInstructionsTitle')}</h4>
+                    <p className="hint">
+                      Fixed instructions OpenDesign follows in every chat. These are
+                      not saved memories; use Memory for facts, preferences, and
+                      project context.
+                    </p>
                   </div>
                 </div>
                 <textarea
-                  className="custom-instructions-input"
-                  rows={3}
+                  className="custom-instructions-input memory-global-rules-input instructions-rules-input"
+                  rows={5}
                   maxLength={5000}
                   placeholder={t('settings.customInstructionsPlaceholder')}
                   value={cfg.customInstructions ?? ''}
-                  onChange={(e) => setCfg({ ...cfg, customInstructions: e.target.value || undefined })}
+                  onChange={(event) =>
+                    setCfg({
+                      ...cfg,
+                      customInstructions: event.target.value || undefined,
+                    })
+                  }
                 />
-              </section>
-              <MemorySection />
-            </>
+              </div>
+            </section>
+          ) : null}
+
+          {activeSection === 'memory' ? (
+            <MemorySection
+              onOpenConnectors={() => setActiveSection('composio')}
+              chatAgentId={cfg.mode === 'daemon' ? cfg.agentId ?? null : null}
+              chatModel={selectedMemoryChatModel}
+            />
           ) : null}
 
           {activeSection === 'privacy' ? (
@@ -2824,6 +2944,13 @@ export function SettingsDialog({
               ) : (
                 <div className="empty-card">{t('settings.versionUnavailable')}</div>
               )}
+              <div className="settings-about-diagnostics">
+                <div className="settings-about-diagnostics-text">
+                  <h4>{t('diagnostics.exportTitle')}</h4>
+                  <p className="hint">{t('diagnostics.exportHint')}</p>
+                </div>
+                <ExportDiagnosticsRow />
+              </div>
             </section>
           ) : null}
           {aboutToast ? (
@@ -2872,6 +2999,8 @@ export function ConnectorSection({
   setCfg,
   composioConfigLoading = false,
   onPersistComposioKey,
+  onConnectorsTabClick,
+  onConnectorAuthResult,
 }: {
   cfg: AppConfig;
   setCfg: Dispatch<SetStateAction<AppConfig>>;
@@ -2885,6 +3014,28 @@ export function ConnectorSection({
    *  once both localStorage and the daemon have caught up so the
    *  section-local Save button can flip from "Saving…" back to idle. */
   onPersistComposioKey: (composio: AppConfig['composio']) => Promise<void> | void;
+  /** Optional analytics hook for the integrations surface. The parent
+   *  (IntegrationsView) wires this so connectors-tab clicks emit on
+   *  `page_name: 'integrations'`; when omitted (SettingsDialog uses the
+   *  settings page family instead), no event is fired. */
+  onConnectorsTabClick?: (
+    element:
+      | 'api_key_input'
+      | 'save_key'
+      | 'clear'
+      | 'get_api_key'
+      | 'provider_chip'
+      | 'search_connectors',
+  ) => void;
+  /** Analytics hook for the per-connector authorization result. Wired
+   *  by the parent so settings_connector_auth_result events fire on
+   *  the settings page family. */
+  onConnectorAuthResult?: (params: {
+    connectorId: string;
+    action: 'connect' | 'disconnect' | 'refresh';
+    result: 'success' | 'failed' | 'cancelled';
+    errorCode?: string;
+  }) => void;
 }) {
   const { t } = useI18n();
   const composio = cfg.composio ?? {};
@@ -3093,6 +3244,7 @@ export function ConnectorSection({
             href="https://app.composio.dev"
             target="_blank"
             rel="noreferrer"
+            onClick={() => onConnectorsTabClick?.('get_api_key')}
           >
             {t('settings.connectorsGetApiKey')}
             <Icon name="external-link" size={11} />
@@ -3115,6 +3267,7 @@ export function ConnectorSection({
                     ? t('settings.connectorsReplaceKeyPlaceholder')
                     : t('settings.connectorsApiKeyPlaceholder')
               }
+              onFocus={() => onConnectorsTabClick?.('api_key_input')}
               onChange={(e) => updateComposio({ apiKey: e.target.value })}
               onKeyDown={(e) => {
                 // Enter from the password field commits the key — the
@@ -3141,7 +3294,10 @@ export function ConnectorSection({
             type="button"
             className={'primary settings-connectors-save' + (keySaveStatus === 'saving' ? ' is-busy' : '')}
             disabled={saveDisabled}
-            onClick={() => void handleSaveKey()}
+            onClick={() => {
+              onConnectorsTabClick?.('save_key');
+              void handleSaveKey();
+            }}
             title={
               composioConfigLoading
                 ? t('settings.connectorsLoadingSavedKey')
@@ -3176,7 +3332,10 @@ export function ConnectorSection({
             }
             aria-expanded={clearStage !== 'idle'}
             aria-controls="composio-clear-confirm"
-            onClick={handleClearRequest}
+            onClick={() => {
+              onConnectorsTabClick?.('clear');
+              handleClearRequest();
+            }}
           >
             {t('settings.connectorsClear')}
           </button>
@@ -3283,6 +3442,8 @@ export function ConnectorSection({
       <ConnectorsBrowser
         composioConfigured={savedApiKeyConfigured}
         catalogRefreshKey={`${savedApiKeyConfigured ? 'configured' : 'empty'}:${tail ?? ''}:${catalogRefreshNonce}`}
+        {...(onConnectorsTabClick ? { onConnectorsTabClick } : {})}
+        {...(onConnectorAuthResult ? { onConnectorAuthResult } : {})}
       />
     </section>
   );
@@ -4360,6 +4521,7 @@ function MediaProvidersSection({
                   as warnings; one chip reads as status.
                 */}
               </div>
+              {provider.id === 'grok' ? <XaiOAuthControl /> : null}
               <div className="media-provider-body">
                 <div className="media-provider-secret-field">
                   <input
@@ -5039,6 +5201,7 @@ function AppearanceSection({
   setCfg: Dispatch<SetStateAction<AppConfig>>;
 }) {
   const { t } = useI18n();
+  const analytics = useAnalytics();
   const current = cfg.theme ?? 'system';
   const currentAccent = normalizeAccentColor(cfg.accentColor) ?? DEFAULT_ACCENT_COLOR;
   const accentLabel = t('pet.fieldAccent');
@@ -5067,7 +5230,19 @@ function AppearanceSection({
             type="button"
             className={'seg-btn' + (current === value ? ' active' : '')}
             aria-pressed={current === value}
-            onClick={() => setCfg((c) => ({ ...c, theme: value }))}
+            onClick={() => {
+              // P1 ui_click area=appearance — `system|light|dark` only
+              // emits from the segmented control; accent swatch picks
+              // use `accent_color` with the swatch hex below.
+              if (value === 'system' || value === 'light' || value === 'dark') {
+                trackSettingsAppearanceClick(analytics.track, {
+                  page: 'settings',
+                  area: 'appearance',
+                  element: value,
+                });
+              }
+              setCfg((c) => ({ ...c, theme: value }));
+            }}
           >
             {icon ? <Icon name={icon} size={14} aria-hidden="true" /> : null}
             <span className="seg-title">{t(labelKey)}</span>
@@ -5088,7 +5263,15 @@ function AppearanceSection({
                 aria-label={color === DEFAULT_ACCENT_COLOR ? defaultAccentLabel : color}
                 aria-checked={active}
                 role="radio"
-                onClick={() => setAccentColor(color)}
+                onClick={() => {
+                  trackSettingsAppearanceClick(analytics.track, {
+                    page: 'settings',
+                    area: 'appearance',
+                    element: 'accent_color',
+                    color,
+                  });
+                  setAccentColor(color);
+                }}
               />
             );
           })}
@@ -5179,6 +5362,40 @@ function CritiqueTheaterSection() {
   );
 }
 
+// Map the runtime SoundId (hyphenated, used by utils/notifications.ts) onto
+// the contract's underscored enum. Sounds that don't have a tracking entry
+// drop to undefined so we never emit an off-enum value.
+function soundIdToTracking(
+  id: string,
+):
+  | 'ding'
+  | 'chime'
+  | 'two_tone_up'
+  | 'pluck'
+  | 'buzz'
+  | 'two_tone_down'
+  | 'thud'
+  | undefined {
+  switch (id) {
+    case 'ding':
+      return 'ding';
+    case 'chime':
+      return 'chime';
+    case 'two-tone-up':
+      return 'two_tone_up';
+    case 'pluck':
+      return 'pluck';
+    case 'buzz':
+      return 'buzz';
+    case 'two-tone-down':
+      return 'two_tone_down';
+    case 'thud':
+      return 'thud';
+    default:
+      return undefined;
+  }
+}
+
 function NotificationsSection({
   cfg,
   setCfg,
@@ -5187,6 +5404,7 @@ function NotificationsSection({
   setCfg: Dispatch<SetStateAction<AppConfig>>;
 }) {
   const { t } = useI18n();
+  const analytics = useAnalytics();
   const notif = cfg.notifications ?? DEFAULT_NOTIFICATIONS;
   const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(
     () => notificationPermission(),
@@ -5204,6 +5422,15 @@ function NotificationsSection({
 
   const toggleSound = () => {
     const next = !notif.soundEnabled;
+    // P1 ui_click area=notifications element=completion_sound — the toggle
+    // emits the post-click state on `completion_sound_status` so a single
+    // event captures intent + outcome.
+    trackSettingsNotificationsClick(analytics.track, {
+      page: 'settings',
+      area: 'notifications',
+      element: 'completion_sound',
+      completion_sound_status: next ? 'on' : 'off',
+    });
     updateNotif({ soundEnabled: next });
     // Give the user immediate audible feedback when turning the master
     // switch on so they know which sound they're signing up for. Resuming
@@ -5213,14 +5440,32 @@ function NotificationsSection({
 
   const toggleDesktop = async () => {
     if (notif.desktopEnabled) {
+      trackSettingsNotificationsClick(analytics.track, {
+        page: 'settings',
+        area: 'notifications',
+        element: 'desktop_notification',
+        desktop_notification_status: 'off',
+      });
       updateNotif({ desktopEnabled: false });
       return;
     }
     const result = await requestNotificationPermission();
     setPermission(result);
     if (result === 'granted') {
+      trackSettingsNotificationsClick(analytics.track, {
+        page: 'settings',
+        area: 'notifications',
+        element: 'desktop_notification',
+        desktop_notification_status: 'on',
+      });
       updateNotif({ desktopEnabled: true });
     } else {
+      trackSettingsNotificationsClick(analytics.track, {
+        page: 'settings',
+        area: 'notifications',
+        element: 'desktop_notification',
+        desktop_notification_status: 'off',
+      });
       updateNotif({ desktopEnabled: false });
     }
   };
@@ -5269,6 +5514,13 @@ function NotificationsSection({
                     className={'seg-btn' + (notif.successSoundId === sound.id ? ' active' : '')}
                     aria-pressed={notif.successSoundId === sound.id}
                     onClick={() => {
+                      const trackingSoundId = soundIdToTracking(sound.id);
+                      trackSettingsNotificationsClick(analytics.track, {
+                        page: 'settings',
+                        area: 'notifications',
+                        element: 'success_sound',
+                        ...(trackingSoundId ? { sound_id: trackingSoundId } : {}),
+                      });
                       updateNotif({ successSoundId: sound.id });
                       playSound(sound.id);
                     }}
@@ -5289,6 +5541,13 @@ function NotificationsSection({
                     className={'seg-btn' + (notif.failureSoundId === sound.id ? ' active' : '')}
                     aria-pressed={notif.failureSoundId === sound.id}
                     onClick={() => {
+                      const trackingSoundId = soundIdToTracking(sound.id);
+                      trackSettingsNotificationsClick(analytics.track, {
+                        page: 'settings',
+                        area: 'notifications',
+                        element: 'failure_sound',
+                        ...(trackingSoundId ? { sound_id: trackingSoundId } : {}),
+                      });
                       updateNotif({ failureSoundId: sound.id });
                       playSound(sound.id);
                     }}
@@ -5330,7 +5589,14 @@ function NotificationsSection({
         ) : null}
         {notif.desktopEnabled && permission === 'granted' ? (
           <>
-            <button type="button" className="ghost" onClick={() => { void sendTestNotification(); }}>
+            <button type="button" className="ghost" onClick={() => {
+              trackSettingsNotificationsClick(analytics.track, {
+                page: 'settings',
+                area: 'notifications',
+                element: 'send_test',
+              });
+              void sendTestNotification();
+            }}>
               {t('settings.notifyTest')}
             </button>
             {testStatus ? <p className="hint" role="status">{t(testStatus)}</p> : null}

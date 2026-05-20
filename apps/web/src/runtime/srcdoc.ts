@@ -27,6 +27,7 @@ export type SrcdocOptions = {
   initialSlideIndex?: number;
   commentBridge?: boolean;
   inspectBridge?: boolean;
+  selectionBridge?: boolean;
   editBridge?: boolean;
   paletteBridge?: boolean;
   initialPalette?: string | null;
@@ -61,7 +62,7 @@ export function buildSrcdoc(
   // active — without that initial seed there is a window after each
   // srcdoc rebuild where the host's `od:*-mode` postMessage races the
   // bridge's own listener install and the iframe ignores clicks.
-  const withSelection = options.commentBridge || options.inspectBridge
+  const withSelection = options.selectionBridge || options.commentBridge || options.inspectBridge
     ? injectSelectionBridge(withDeck, {
         initialCommentMode: !!options.commentBridge,
         initialInspectMode: !!options.inspectBridge,
@@ -71,7 +72,91 @@ export function buildSrcdoc(
     ? injectPaletteBridge(withSelection, { initialPalette: options.initialPalette ?? null })
     : withSelection;
   const withEdit = options.editBridge ? injectManualEditBridge(withPalette) : withPalette;
-  return injectSnapshotBridge(withEdit);
+  return injectSrcdocTransportActivationBridge(injectSnapshotBridge(withEdit));
+}
+
+/**
+ * Build the lazy transport shell.
+ *
+ * The shell does two things:
+ *   1. Register a listener for `od:srcdoc-transport-activate` that replaces
+ *      its own document with the real artifact HTML.
+ *   2. Post `od:srcdoc-transport-ready` to the parent as soon as the listener
+ *      is installed. This `ready` signal is the only reliable way for the
+ *      host to know the listener is live; without it, the host risks posting
+ *      `activate` before the iframe's script has executed (e.g. right after a
+ *      key-driven re-mount), in which case the message is dropped and the
+ *      iframe stays stuck on the empty shell. See #2253.
+ */
+export function buildLazySrcdocTransport(): string {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script data-od-lazy-srcdoc-transport>(function(){
+      window.addEventListener('message', function(ev){
+        var data = ev && ev.data;
+        if (!data || data.type !== 'od:srcdoc-transport-activate' || typeof data.html !== 'string') return;
+        document.open();
+        document.write(data.html);
+        document.close();
+      });
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'od:srcdoc-transport-ready' }, '*');
+        }
+      } catch (_) { /* sandboxed parent — host falls back to onLoad */ }
+    })();</script>
+  </head>
+  <body></body>
+</html>`;
+}
+
+export interface SrcDocActivationInputs {
+  /** The real artifact HTML the host wants to inject into the shell. */
+  srcDoc: string;
+  /** Host is currently showing the URL-loaded iframe (srcDoc iframe is hidden). */
+  useUrlLoadPreview: boolean;
+  /** Host's render pipeline is routing through the lazy transport shell. */
+  useLazySrcDocTransport: boolean;
+  /** The shell document has loaded AND posted `od:srcdoc-transport-ready`. */
+  shellReady: boolean;
+  /** Which artifact HTML has already been pushed into this shell (dedupe). */
+  activatedHtml: string | null;
+}
+
+/**
+ * Pure decision for whether the host should now post
+ * `od:srcdoc-transport-activate` to the shell iframe.
+ *
+ * Gating on `shellReady` is the fix for #2253: without it, an activation
+ * triggered by `useUrlLoadPreview` flipping to false (e.g. opening the
+ * Tweaks palette) can fire while the iframe's shell script has not yet
+ * registered its message listener. The message is dropped, the shell stays
+ * on its empty 536-byte body, and the dedupe check then suppresses the
+ * follow-up activation from the iframe's onLoad path.
+ */
+export function canActivateSrcDocTransport(state: SrcDocActivationInputs): boolean {
+  if (!state.srcDoc) return false;
+  if (state.useUrlLoadPreview) return false;
+  if (!state.useLazySrcDocTransport) return false;
+  if (!state.shellReady) return false;
+  if (state.activatedHtml === state.srcDoc) return false;
+  return true;
+}
+
+function injectSrcdocTransportActivationBridge(doc: string): string {
+  const script = `<script data-od-srcdoc-transport-activation>(function(){
+  window.addEventListener('message', function(ev){
+    var data = ev && ev.data;
+    if (!data || data.type !== 'od:srcdoc-transport-activate' || typeof data.html !== 'string') return;
+    document.open();
+    document.write(data.html);
+    document.close();
+  });
+})();</script>`;
+  return injectBeforeBodyEnd(doc, script);
 }
 
 function injectSnapshotBridge(doc: string): string {
@@ -192,6 +277,10 @@ function injectPaletteBridge(
   var SAVED = '__odPaletteSaved__';
   var MIN_SAT = 0.08;
   var WALK_LIMIT = 12000;
+  var STYLE_RULE_LIMIT = 5000;
+  var ROOT_SELECTOR = /(^|,)\\s*(:root|html|body|:host)\\s*($|,)/;
+  var varApplied = Object.create(null);
+  var probeEl = null;
   function parseRgb(s){
     var str = String(s||'').trim();
     if (!str || str === 'transparent' || str === 'none') return null;
@@ -246,7 +335,65 @@ function injectPaletteBridge(
     var sat = Math.max(hsl.s, palette.satFloor * 0.7);
     return hslStr(palette.hue, sat, hsl.l);
   }
+  function normalizeColor(value){
+    var raw = String(value||'').trim();
+    if (!raw) return null;
+    var direct = parseRgb(raw);
+    if (direct) return direct;
+    if (raw.indexOf('var(') === 0 || raw.indexOf('--') === 0) return null;
+    if (!probeEl){
+      probeEl = document.createElement('div');
+      probeEl.style.display = 'none';
+      (document.body || document.documentElement).appendChild(probeEl);
+    }
+    probeEl.style.color = '';
+    try { probeEl.style.color = raw; } catch (_){ return null; }
+    if (!probeEl.style.color) return null;
+    return parseRgb(probeEl.style.color);
+  }
+  function isRootSelector(selector){
+    return !!selector && ROOT_SELECTOR.test(String(selector));
+  }
+  function forEachStyleRule(rules, visit, budget){
+    if (!rules || !budget.left) return;
+    for (var i=0; i<rules.length && budget.left>0; i++){
+      var rule = rules[i];
+      budget.left--;
+      if (rule.selectorText && rule.style && isRootSelector(rule.selectorText)) visit(rule);
+      if (rule.cssRules && rule.cssRules.length) forEachStyleRule(rule.cssRules, visit, budget);
+    }
+  }
+  function applyVarTint(palette){
+    var sheets = document.styleSheets;
+    if (!sheets || !sheets.length) return;
+    var budget = { left: STYLE_RULE_LIMIT };
+    for (var i=0; i<sheets.length; i++){
+      var sheet = sheets[i];
+      var rules = null;
+      try { rules = sheet.cssRules; } catch (_){ continue; }
+      forEachStyleRule(rules, function(rule){
+        var decl = rule.style;
+        for (var j=0; j<decl.length; j++){
+          var name = decl[j];
+          if (name.indexOf('--') !== 0) continue;
+          var raw = decl.getPropertyValue(name);
+          var color = normalizeColor(raw);
+          var hsl = chromatic(color);
+          if (!hsl) continue;
+          document.documentElement.style.setProperty(name, shift(hsl, palette));
+          varApplied[name] = true;
+        }
+      }, budget);
+    }
+  }
+  function restoreVars(){
+    for (var name in varApplied){
+      document.documentElement.style.setProperty(name, '');
+    }
+    varApplied = Object.create(null);
+  }
   function restoreAll(){
+    restoreVars();
     var nodes = document.querySelectorAll('['+ATTR+']');
     for (var i=0;i<nodes.length;i++){
       var el = nodes[i], saved = el[SAVED];
@@ -264,6 +411,7 @@ function injectPaletteBridge(
   function applyTint(id){
     var palette = PALETTES[id];
     if (!palette) return;
+    applyVarTint(palette);
     var all = document.body ? document.body.querySelectorAll('*') : [];
     for (var i=0; i<all.length && i<WALK_LIMIT; i++){
       var el = all[i], cs = getComputedStyle(el), saved = {}, changed = false;
@@ -812,7 +960,7 @@ function meaningfulDomFallbackTarget(el) {
 
   return true;
 }
-  function targetFrom(el, allowDomFallback){
+  function targetFrom(el, allowDomFallback, clickedEl){
     var id = el.getAttribute('data-od-id') || el.getAttribute('data-screen-label');
     var selector = annotatedSelectorFor(el);
     if (!id && allowDomFallback && meaningfulDomFallbackTarget(el)) {
@@ -825,7 +973,7 @@ function meaningfulDomFallbackTarget(el) {
     var cls = typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\\s+/).slice(0,2).join('.') : '';
     var html = '';
     try { html = (el.outerHTML || '').replace(/\\s+/g, ' ').match(/^<[^>]+>/)?.[0] || ''; } catch (_) {}
-    return {
+    var payload = {
       type: 'od:comment-target',
       elementId: id,
       selector: selector,
@@ -835,6 +983,15 @@ function meaningfulDomFallbackTarget(el) {
       htmlHint: html.slice(0, 180),
       style: styleSnapshot(el)
     };
+    if (clickedEl && clickedEl !== el) {
+      var clickedTag = clickedEl.tagName ? clickedEl.tagName.toLowerCase() : 'element';
+      var clickedCls = typeof clickedEl.className === 'string' && clickedEl.className.trim() ? '.' + clickedEl.className.trim().split(/\\s+/).slice(0,2).join('.') : '';
+      payload.clickedDescendant = {
+        label: clickedTag + clickedCls,
+        text: (clickedEl.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)
+      };
+    }
+    return payload;
   }
   function allTargets(){
     var annotatedNodes = document.querySelectorAll('[data-od-id], [data-screen-label]');
@@ -907,15 +1064,18 @@ function meaningfulDomFallbackTarget(el) {
     return commentEnabled && !inspectEnabled && document.querySelectorAll('[data-od-id], [data-screen-label]').length === 0;
   }
   function closestTarget(event){
-    var el = event.target;
+    var clicked = event.target;
+    var el = clicked;
     var fallback = null;
     var allowDomFallback = mode === 'picker' && canUseDomFallback();
     while (el && el !== document.documentElement) {
-      if (el.getAttribute && (el.hasAttribute('data-od-id') || el.hasAttribute('data-screen-label'))) return el;
-if (!fallback && allowDomFallback && meaningfulDomFallbackTarget(el)) fallback = el;
+      if (el.getAttribute && (el.hasAttribute('data-od-id') || el.hasAttribute('data-screen-label'))) {
+        return { target: el, clicked: clicked };
+      }
+      if (!fallback && allowDomFallback && meaningfulDomFallbackTarget(el)) fallback = el;
       el = el.parentElement;
     }
-    return fallback;
+    return fallback ? { target: fallback, clicked: clicked } : null;
   }
   function applyOverride(elementId, selector, prop, value){
     if (!elementId || !prop) return;
@@ -1026,20 +1186,20 @@ if (!fallback && allowDomFallback && meaningfulDomFallbackTarget(el)) fallback =
   function pickerActive(){ return inspectEnabled || (commentEnabled && mode === 'picker'); }
   document.addEventListener('mouseover', function(ev){
     if (!pickerActive()) return;
-    var el = closestTarget(ev);
-    if (!el) return;
-    var payload = targetFrom(el, commentEnabled && mode === 'picker' && !inspectEnabled);
+    var result = closestTarget(ev);
+    if (!result) return;
+    var payload = targetFrom(result.target, commentEnabled && mode === 'picker' && !inspectEnabled);
     if (!payload || payload.elementId === hoveredId) return;
     hoveredId = payload.elementId;
     window.parent.postMessage(Object.assign({}, payload, { type: 'od:comment-hover' }), '*');
   }, true);
   document.addEventListener('mouseout', function(ev){
     if (!pickerActive()) return;
-    var el = closestTarget(ev);
-    if (!el) return;
+    var result = closestTarget(ev);
+    if (!result) return;
     var next = ev.relatedTarget;
     while (next && next !== document.documentElement) {
-      if (next === el) return;
+      if (next === result.target) return;
       next = next.parentElement;
     }
     hoveredId = null;
@@ -1047,11 +1207,11 @@ if (!fallback && allowDomFallback && meaningfulDomFallbackTarget(el)) fallback =
   }, true);
   document.addEventListener('click', function(ev){
     if (!pickerActive()) return;
-    var el = closestTarget(ev);
-    if (el) {
+    var result = closestTarget(ev);
+    if (result) {
       ev.preventDefault();
       ev.stopPropagation();
-      var payload = targetFrom(el, commentEnabled && mode === 'picker' && !inspectEnabled);
+      var payload = targetFrom(result.target, commentEnabled && mode === 'picker' && !inspectEnabled, result.clicked);
       if (payload) window.parent.postMessage(payload, '*');
       return;
     }
@@ -1152,6 +1312,11 @@ if (!fallback && allowDomFallback && meaningfulDomFallbackTarget(el)) fallback =
 html[data-od-comment-mode] body * { cursor: crosshair !important; }
 html[data-od-inspect-mode] body * { cursor: crosshair !important; }
 html[data-od-comment-mode][data-od-comment-mode-kind="pod"] body * { cursor: cell !important; }
+/* Nested iframes (e.g. shared device frames) consume clicks in their own browsing context.
+   While picker modes are on, disable pointer events on outer-document iframes so the
+   hit target resolves to an annotated ancestor (card, shell) in this document. */
+html[data-od-comment-mode] body iframe,
+html[data-od-inspect-mode] body iframe { pointer-events: none !important; }
 </style>`;
   return injectBeforeBodyEnd(injectBeforeHeadEnd(doc, style), script);
 }
