@@ -48,6 +48,8 @@ type TranslateFn = (
   vars?: Record<string, string | number>
 ) => string;
 
+const DISCORD_INVITE_URL = "https://discord.gg/mHAjSMV6gz";
+
 interface Props {
   message: ChatMessage;
   streaming: boolean;
@@ -78,6 +80,7 @@ interface Props {
   onContinueRemainingTasks?: (todos: TodoItem[]) => void;
   onFeedback?: (change: ChatMessageFeedbackChange) => void;
   suppressDirectionForms?: boolean;
+  hasDesignSystemContext?: boolean;
 }
 
 /**
@@ -105,6 +108,7 @@ export function AssistantMessage({
   onContinueRemainingTasks,
   onFeedback,
   suppressDirectionForms = false,
+  hasDesignSystemContext = false,
 }: Props) {
   const t = useT();
   const events = message.events ?? [];
@@ -121,12 +125,25 @@ export function AssistantMessage({
   );
   const fileOps = useMemo(() => deriveFileOps(events), [events]);
   const produced = message.producedFiles ?? [];
+  const displayedProduced = useMemo(
+    () =>
+      produced.length > 0
+        ? produced
+        : inferProducedFilesFromTurn({
+            message,
+            projectFiles,
+            blocks,
+            fileOps,
+            streaming,
+          }),
+    [blocks, fileOps, message, produced, projectFiles, streaming],
+  );
   const pluginActionFolders = useMemo(
     () =>
       !streaming && isLast && projectId
-        ? pluginFoldersTouchedThisTurn(projectFiles, fileOps, produced, message.content)
+        ? pluginFoldersTouchedThisTurn(projectFiles, fileOps, displayedProduced, message.content)
         : [],
-    [fileOps, isLast, message.content, produced, projectFiles, projectId, streaming],
+    [displayedProduced, fileOps, isLast, message.content, projectFiles, projectId, streaming],
   );
   const usage = events.find((e) => e.kind === "usage") as
     | Extract<AgentEvent, { kind: "usage" }>
@@ -151,7 +168,6 @@ export function AssistantMessage({
       message,
       hasEmptyResponse,
       hasUnfinishedTodos: unfinishedTodos.length > 0,
-      hasArtifactWork: hasArtifactWorkSignal(message, produced.length),
     });
   const showCompletionRow =
     showFeedback ||
@@ -246,9 +262,9 @@ export function AssistantMessage({
             return <StatusPill key={i} label={b.label} detail={b.detail} />;
           return null;
         })}
-        {!streaming && produced.length > 0 && projectId ? (
+        {!streaming && displayedProduced.length > 0 && projectId ? (
           <ProducedFiles
-            files={produced}
+            files={displayedProduced}
             projectId={projectId}
             onRequestOpenFile={onRequestOpenFile}
           />
@@ -278,7 +294,8 @@ export function AssistantMessage({
                 conversationId={conversationId}
                 runId={message.runId ?? null}
                 assistantMessageId={message.id}
-                producedFileCount={produced.length}
+                producedFileCount={displayedProduced.length}
+                hasDesignSystemContext={hasDesignSystemContext}
                 footerProps={{
                   streaming,
                   startedAt: message.startedAt,
@@ -306,61 +323,50 @@ export function AssistantMessage({
   );
 }
 
+function inferProducedFilesFromTurn({
+  message,
+  projectFiles,
+  blocks,
+  fileOps,
+  streaming,
+}: {
+  message: ChatMessage;
+  projectFiles: ProjectFile[];
+  blocks: Block[];
+  fileOps: FileOpEntry[];
+  streaming: boolean;
+}): ProjectFile[] {
+  if (streaming || message.role !== "assistant") return [];
+  if (message.runStatus !== "succeeded") return [];
+  if (!message.startedAt || !message.endedAt) return [];
+  if (blocks.some((block) => block.kind === "text" || block.kind === "tool-group")) return [];
+  if (fileOps.length > 0) return [];
+  const start = message.startedAt - 1_000;
+  const end = message.endedAt + 60_000;
+  return projectFiles
+    .filter((file) => {
+      if (file.type === "dir") return false;
+      if (!file.name || file.name.startsWith(".")) return false;
+      if (file.name.includes("/.")) return false;
+      return file.mtime >= start && file.mtime <= end;
+    })
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
 function isFeedbackEligible({
   streaming,
   message,
   hasEmptyResponse,
   hasUnfinishedTodos,
-  hasArtifactWork,
 }: {
   streaming: boolean;
   message: ChatMessage;
   hasEmptyResponse: boolean;
   hasUnfinishedTodos: boolean;
-  hasArtifactWork: boolean;
 }): boolean {
   if (streaming || hasEmptyResponse || hasUnfinishedTodos) return false;
-  if (!hasArtifactWork) return false;
   if (message.runStatus) return message.runStatus === "succeeded";
   return !!message.endedAt;
-}
-
-function hasArtifactWorkSignal(message: ChatMessage, producedFileCount: number): boolean {
-  if (producedFileCount > 0) return true;
-  if (message.content.includes("<artifact")) return true;
-  if (hasLiveArtifactMutation(message.events ?? [])) return true;
-  return hasSuccessfulFileMutation(message.events ?? []);
-}
-
-function hasLiveArtifactMutation(events: AgentEvent[]): boolean {
-  return events.some((event) => {
-    if (event.kind !== "live_artifact") return false;
-    return event.action === "created" || event.action === "updated";
-  });
-}
-
-function hasSuccessfulFileMutation(events: AgentEvent[]): boolean {
-  const errorByToolId = new Map<string, boolean>();
-  for (const event of events) {
-    if (event.kind === "tool_result") {
-      errorByToolId.set(event.toolUseId, event.isError);
-    }
-  }
-  return events.some((event) => {
-    if (event.kind !== "tool_use") return false;
-    if (!isFileMutationToolName(event.name)) return false;
-    return errorByToolId.get(event.id) !== true;
-  });
-}
-
-function isFileMutationToolName(name: string): boolean {
-  return (
-    name === "Write" ||
-    name === "write" ||
-    name === "create_file" ||
-    name === "Edit" ||
-    name === "str_replace_edit"
-  );
 }
 
 function MessageTimestamp({
@@ -480,6 +486,7 @@ function AssistantFooter({
 function AssistantFeedback({
   feedback,
   onFeedback,
+  hasDesignSystemContext,
   footerProps,
   projectId,
   projectKind,
@@ -490,6 +497,7 @@ function AssistantFeedback({
 }: {
   feedback: ChatMessage["feedback"];
   onFeedback: (change: ChatMessageFeedbackChange) => void;
+  hasDesignSystemContext: boolean;
   footerProps: AssistantFooterProps;
   projectId: string | null;
   projectKind: TrackingProjectKind | null;
@@ -649,7 +657,7 @@ function AssistantFeedback({
     setReasonRating(null);
   };
   const reasonOptions = reasonRating
-    ? feedbackReasonOptions(reasonRating, t)
+    ? feedbackReasonOptions(reasonRating, t, hasDesignSystemContext)
     : [];
   const reasonEmoji = reasonRating === "positive" ? "😊" : "😔";
   const showOtherInput = draftReasonCodes.has("other");
@@ -735,14 +743,39 @@ function AssistantFeedback({
               onChange={(event) => setCustomReason(event.target.value)}
             />
           ) : null}
-          <button
-            type="button"
-            className="assistant-feedback-submit"
-            disabled={!canSubmit}
-            onClick={submitReasons}
-          >
-            {t("assistant.feedbackReasonSubmit")}
-          </button>
+          {reasonRating === "positive" ? (
+            <p className="assistant-feedback-discord-note">
+              Share what you made with the{" "}
+              <a
+                href={DISCORD_INVITE_URL}
+                data-testid="assistant-feedback-discord-positive"
+              >
+                Discord
+              </a>{" "}
+              community, or drop a screenshot and tell us what worked well.
+            </p>
+          ) : (
+            <p className="assistant-feedback-discord-note">
+              Share more context in{" "}
+              <a
+                href={DISCORD_INVITE_URL}
+                data-testid="assistant-feedback-discord-negative"
+              >
+                Discord
+              </a>{" "}
+              so the team can understand what went wrong and follow up directly.
+            </p>
+          )}
+          <div className="assistant-feedback-actions">
+            <button
+              type="button"
+              className="assistant-feedback-submit"
+              disabled={!canSubmit}
+              onClick={submitReasons}
+            >
+              {t("assistant.feedbackReasonSubmit")}
+            </button>
+          </div>
         </div>
       ) : null}
     </div>
@@ -752,6 +785,7 @@ function AssistantFeedback({
 function feedbackReasonOptions(
   rating: ChatMessageFeedbackRating,
   t: TranslateFn,
+  hasDesignSystemContext: boolean,
 ): Array<{ code: ChatMessageFeedbackReasonCode; label: string }> {
   const codes: ChatMessageFeedbackReasonCode[] =
     rating === "positive"
@@ -760,6 +794,7 @@ function feedbackReasonOptions(
           "strong_visual",
           "useful_structure",
           "easy_to_continue",
+          ...(hasDesignSystemContext ? (["followed_design_system"] as const) : []),
           "other",
         ]
       : [
@@ -767,6 +802,7 @@ function feedbackReasonOptions(
           "weak_visual",
           "incomplete_output",
           "hard_to_use",
+          ...(hasDesignSystemContext ? (["missed_design_system"] as const) : []),
           "other",
         ];
   return codes.map((code) => ({ code, label: feedbackReasonLabel(code, t) }));
@@ -785,6 +821,8 @@ function feedbackReasonLabel(
       return t("assistant.feedbackReasonPositiveUseful");
     case "easy_to_continue":
       return t("assistant.feedbackReasonPositiveEasy");
+    case "followed_design_system":
+      return t("assistant.feedbackReasonPositiveDesignSystem");
     case "missed_request":
       return t("assistant.feedbackReasonNegativeMissed");
     case "weak_visual":
@@ -793,6 +831,8 @@ function feedbackReasonLabel(
       return t("assistant.feedbackReasonNegativeIncomplete");
     case "hard_to_use":
       return t("assistant.feedbackReasonNegativeHard");
+    case "missed_design_system":
+      return t("assistant.feedbackReasonNegativeDesignSystem");
     case "other":
       return t("assistant.feedbackReasonOther");
   }
