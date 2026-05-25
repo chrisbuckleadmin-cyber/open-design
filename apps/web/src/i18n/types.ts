@@ -376,6 +376,7 @@ export interface Dict {
   'settings.designSystems': string;
   'settings.designSystemsHint': string;
   'settings.designSystemsInstalled': string;
+  'settings.designSystemRenameFailed': string;
   'settings.designSystemsAdd': string;
   'settings.designSystemsHiddenCount': string;
   'settings.designSystemsShowAll': string;
@@ -1485,6 +1486,7 @@ export interface Dict {
   'designs.status.succeeded': string;
   'designs.status.failed': string;
   'designs.status.canceled': string;
+  'designs.status.published': string;
   'designs.viewToggleAria': string;
   'designs.viewGrid': string;
   'designs.viewKanban': string;
@@ -1882,9 +1884,11 @@ export interface Dict {
   'fileViewer.draw': string;
   'manualEdit.layers': string;
   'manualEdit.editableCount': string;
+  'manualEdit.hiddenBadge': string;
   'manualEdit.title': string;
   'manualEdit.selectLayer': string;
   'manualEdit.empty': string;
+  'manualEdit.noEditableLayers': string;
   'manualEdit.noClass': string;
   'manualEdit.tabsAria': string;
   'manualEdit.tabContent': string;
