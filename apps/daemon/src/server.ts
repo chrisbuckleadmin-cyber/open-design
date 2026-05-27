@@ -24,6 +24,7 @@ import {
   shouldRenderCodexImagegenOverride,
 } from './prompts/system.js';
 import { expandHomePrefix, resolveProjectRelativePath } from './home-expansion.js';
+import { userFacingAgentLabel } from './user-facing-agent-label.js';
 import { createCommandInvocation } from '@open-design/platform';
 import { SIDECAR_DEFAULTS, SIDECAR_ENV } from '@open-design/sidecar-proto';
 import {
@@ -8844,7 +8845,7 @@ export async function startServer({
   // Preflight for the raw file route. Current artifact fetches are simple GETs
   // (no preflight needed), but an explicit handler future-proofs the route if
   // artifacts ever add custom request headers.
-  app.options('/api/projects/:id/raw/*splat', (req, res) => {
+  app.options(/^\/api\/projects\/([^/]+)\/raw\/(.+)$/u, (req, res) => {
     if (req.headers.origin === 'null') {
       res.header('Access-Control-Allow-Origin', '*');
       res.header('Access-Control-Allow-Methods', 'GET');
@@ -8853,12 +8854,12 @@ export async function startServer({
     res.sendStatus(204);
   });
 
-  app.get('/api/projects/:id/raw/*splat', async (req, res) => {
+  app.get(/^\/api\/projects\/([^/]+)\/raw\/(.+)$/u, async (req, res) => {
     try {
-      const splatParam = req.params.splat;
-      const relPath = Array.isArray(splatParam) ? splatParam.join('/') : String(splatParam ?? '');
-      const project = getProject(db, req.params.id);
-      const file = await readProjectFile(PROJECTS_DIR, req.params.id, relPath, project?.metadata);
+      const projectId = String(req.params[0] ?? '');
+      const relPath = String(req.params[1] ?? '');
+      const project = getProject(db, projectId);
+      const file = await readProjectFile(PROJECTS_DIR, projectId, relPath, project?.metadata);
       // PreviewModal loads artifact HTML via srcdoc, giving the iframe Origin: "null".
       // data: URIs, file://, and some sandboxed iframes also send null — all are
       // local-only callers, so this is safe. Real cross-origin sites send a real
@@ -8913,12 +8914,12 @@ export async function startServer({
     }
   });
 
-  app.delete('/api/projects/:id/raw/*splat', async (req, res) => {
+  app.delete(/^\/api\/projects\/([^/]+)\/raw\/(.+)$/u, async (req, res) => {
     try {
-      const project = getProject(db, req.params.id);
-      const splatParam = req.params.splat;
-      const rawSplat = Array.isArray(splatParam) ? splatParam.join('/') : String(splatParam ?? '');
-      await deleteProjectFile(PROJECTS_DIR, req.params.id, rawSplat, project?.metadata);
+      const projectId = String(req.params[0] ?? '');
+      const rawSplat = String(req.params[1] ?? '');
+      const project = getProject(db, projectId);
+      await deleteProjectFile(PROJECTS_DIR, projectId, rawSplat, project?.metadata);
       /** @type {import('@open-design/contracts').DeleteProjectFileResponse} */
       const body = { ok: true };
       res.json(body);
@@ -8960,14 +8961,14 @@ export async function startServer({
     }
   });
 
-  app.get('/api/projects/:id/files/*splat', async (req, res) => {
+  app.get(/^\/api\/projects\/([^/]+)\/files\/(.+)$/u, async (req, res) => {
     try {
-      const project = getProject(db, req.params.id);
-      const splatParam = req.params.splat;
-      const fileSplat = Array.isArray(splatParam) ? splatParam.join('/') : String(splatParam ?? '');
+      const projectId = String(req.params[0] ?? '');
+      const fileSplat = String(req.params[1] ?? '');
+      const project = getProject(db, projectId);
       const file = await readProjectFile(
         PROJECTS_DIR,
-        req.params.id,
+        projectId,
         fileSplat,
         project?.metadata,
       );
@@ -10696,7 +10697,7 @@ export async function startServer({
       const message =
         `Agent stalled without emitting any new output for ${Math.round(inactivityTimeoutMs / 1000)}s. ` +
         'The model or CLI likely hung while generating. ' +
-        `Phase details: spawned agent binary ${resolvedBin}; stdout arrived: ${childStdoutSeen ? 'yes' : 'no'}; ` +
+        `Phase details: spawned agent ${userFacingAgentLabel(agentId, resolvedBin)}; stdout arrived: ${childStdoutSeen ? 'yes' : 'no'}; ` +
         `last agent event: ${lastAgentEventPhase}; largest tool result observed: ${lastToolResultChars} chars. ` +
         'Retry the turn, pick a different model, or start a new conversation if the prior context is very large.';
       send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', message, { retryable: true }));
@@ -10788,7 +10789,7 @@ export async function startServer({
     send('start', {
       runId,
       agentId,
-      bin: resolvedBin,
+      bin: userFacingAgentLabel(agentId, resolvedBin),
       streamFormat: def.streamFormat ?? 'plain',
       projectId: typeof projectId === 'string' ? projectId : null,
       cwd,
