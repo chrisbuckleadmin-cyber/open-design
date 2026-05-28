@@ -12,6 +12,7 @@ import {
   trackArtifactExportResult,
   trackArtifactHeaderClick,
   trackArtifactToolbarClick,
+  trackCommentPopoverClick,
   trackPageView,
   trackPresentPopoverClick,
   trackShareOptionPopoverClick,
@@ -3785,6 +3786,17 @@ function HtmlViewer({
       artifact_kind: artifactKindToTracking({ fileKind: file.kind ?? null }),
     });
   };
+  const fireCommentPopoverClick = (
+    element: 'save_comment' | 'send_to_chat' | 'add_note',
+  ) => {
+    trackCommentPopoverClick(analytics.track, {
+      page_name: 'artifact',
+      area: 'comment_popover',
+      element,
+      artifact_id: anonymizeArtifactId({ projectId, fileName: file.name }),
+      artifact_kind: artifactKindToTracking({ fileKind: file.kind ?? null }),
+    });
+  };
   const [mode, setMode] = useState<'preview' | 'source'>('preview');
   const [source, setSource] = useState<string | null>(liveHtml ?? null);
   const [inlinedSource, setInlinedSource] = useState<string | null>(null);
@@ -4045,6 +4057,7 @@ function HtmlViewer({
   const [sendingBoardBatch, setSendingBoardBatch] = useState(false);
   const [commentSavedToast, setCommentSavedToast] = useState<string | null>(null);
   const [templateSavedToast, setTemplateSavedToast] = useState<string | null>(null);
+  const [deploySavedToast, setDeploySavedToast] = useState<{ message: string; details: string } | null>(null);
   const [selectedSideCommentIds, setSelectedSideCommentIds] = useState<Set<string>>(() => new Set());
   const [commentSidePanelCollapsed, setCommentSidePanelCollapsed] = useState(false);
   const [strokePoints, setStrokePoints] = useState<StrokePoint[]>([]);
@@ -5604,6 +5617,15 @@ function HtmlViewer({
       }));
       setDeployment(next);
       setDeployResult(next);
+      if (deployResultState(next.status) !== 'failed') {
+        setDeploySavedToast({
+          message: t('fileViewer.deploySuccessToast'),
+          details: t('fileViewer.deploySuccessToastDetails', {
+            provider: deployProviderLabel,
+            url: next.url,
+          }),
+        });
+      }
     } catch (err) {
       const option = getDeployProviderOption(deployProviderId);
       setDeployError(
@@ -6045,7 +6067,7 @@ function HtmlViewer({
       ? t('fileViewer.deployingToProvider', { provider: deployProviderLabel })
       : deployPhase === 'preparing-link'
         ? t('fileViewer.preparingPublicLink')
-        : t('fileViewer.deployToProvider', { provider: deployProviderLabel });
+        : deployActionLabelFor(deployProviderId);
   const copyDeployLabel = (url: string) =>
     copiedDeployLink === url.trim()
       ? t('fileViewer.copied')
@@ -6122,8 +6144,8 @@ function HtmlViewer({
         setQueuedBoardNotes((current) => current.filter((_, currentIndex) => currentIndex !== index))
       }
       onClose={clearBoardComposer}
-      onSaveComment={savePersistentComment}
-      onSendBatch={sendBoardBatch}
+      onSaveComment={() => { fireCommentPopoverClick('save_comment'); return savePersistentComment(); }}
+      onSendBatch={() => { fireCommentPopoverClick('send_to_chat'); return sendBoardBatch(); }}
       onRemoveMember={(elementId) => {
         setActiveCommentTarget((current) => {
           const { next, shouldClose } = applyPodMemberRemoval(current, elementId);
@@ -6195,6 +6217,7 @@ function HtmlViewer({
           (comment) => selectedSideCommentIds.has(comment.id),
         );
         if (selected.length === 0) return;
+        fireCommentPopoverClick('send_to_chat');
         setSendingBoardBatch(true);
         try {
           await onSendBoardCommentAttachments(commentsToAttachments(selected));
@@ -7176,6 +7199,14 @@ function HtmlViewer({
               )}
               <p className="hint">{t(deployProvider.previewHintKey)}</p>
               {deployError ? <p className="deploy-error">{deployError}</p> : null}
+              {!deployError
+                && deployPhase === 'idle'
+                && deployResultCards.length > 0
+                && deployResultState(activeDeployment?.status) === 'ready' ? (
+                <p className="hint" role="status">
+                  {t('fileViewer.deployLinkReady')} · {t('fileViewer.deployResultLabel')}
+                </p>
+              ) : null}
               {deployResultCards.length > 0 ? (
                 <div className={`deploy-result-block ${deployResultState(activeDeployment?.status)}`}>
                   <div className="deploy-result-summary">
@@ -7277,6 +7308,16 @@ function HtmlViewer({
             </div>
           </div>
         </div>
+      ) : null}
+      {deploySavedToast ? (
+        <Toast
+          message={deploySavedToast.message}
+          details={deploySavedToast.details}
+          tone="success"
+          placement="top"
+          ttlMs={3600}
+          onDismiss={() => setDeploySavedToast(null)}
+        />
       ) : null}
     </div>
   );
